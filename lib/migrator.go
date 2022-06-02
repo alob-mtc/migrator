@@ -62,10 +62,19 @@ func (m Migrator) RunWithValue(value interface{}, fc func(*gorm.Statement) error
 }
 
 // AutoMigrate auto migrate values
-func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
+func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 	var migrationSQL string
 	var migrationSQLDrop string
 	taps := "\n\n\n"
+
+	excludedTables := m.ExcludedTable(values)
+	if len(excludedTables) > 0 {
+		migrationSQLDrop += "-- Drop Table \n"
+		for _, tableName := range excludedTables {
+			migrationSQLDrop += fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName)
+		}
+	}
+
 	for _, value := range m.ReorderModels(values, true) {
 		if !m.HasTable(value) {
 			migrationSQL_, migrationSQLDrop_ := m.CreateTable(value)
@@ -129,7 +138,7 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
 
 				return nil
 			}); err != nil {
-				return "", err
+				return "", "", err
 			}
 
 			migrationSQL += alterSchemaSQL + taps
@@ -137,11 +146,11 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
 		}
 	}
 
-	if migrationSQL != taps {
-		return migrationSQL, nil
+	if migrationSQL != taps || migrationSQLDrop != taps {
+		return migrationSQL, migrationSQLDrop, nil
 	}
 
-	return "", nil
+	return "", "", nil
 }
 
 // CreateTable create table in database for values
@@ -152,7 +161,7 @@ func (m Migrator) CreateTable(values ...interface{}) (string, string) {
 		if err := m.RunWithValue(value, func(stmt *gorm.Statement) (errr error) {
 			var (
 				createTableSQL          = "CREATE TABLE ? ("
-				dropTableSQL            = "DROP TABLE ?"
+				dropTableSQL            = "DROP TABLE IF EXISTS ?"
 				values                  = []interface{}{m.CurrentTable(stmt)}
 				hasPrimaryKeyInDataType bool
 			)
@@ -247,20 +256,6 @@ func (m Migrator) CreateTable(values ...interface{}) (string, string) {
 	return createTableSQLRaw, dropTableSQLRaw
 }
 
-// DropTable drop table for values
-func (m Migrator) DropTable(values ...interface{}) error {
-	values = m.ReorderModels(values, false)
-	for i := len(values) - 1; i >= 0; i-- {
-		tx := m.DB.Session(&gorm.Session{})
-		if err := m.RunWithValue(values[i], func(stmt *gorm.Statement) error {
-			return tx.Exec("DROP TABLE IF EXISTS ?", m.CurrentTable(stmt)).Error
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // HasTable returns table exists or not for value, value could be a struct or string
 func (m Migrator) HasTable(value interface{}) bool {
 	var count int64
@@ -269,6 +264,42 @@ func (m Migrator) HasTable(value interface{}) bool {
 		return m.DB.Raw("SELECT count(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ? AND table_type = ?", currentSchema, curTable, "BASE TABLE").Scan(&count).Error
 	})
 	return count > 0
+}
+
+// HasTable returns table exists or not for value, value could be a struct or string
+func (m Migrator) ExcludedTable(values []interface{}) []string {
+	type Tables struct {
+		TableName string
+	}
+
+	var currentTables []Tables
+	var excludedTables []string
+	m.RunWithValue(values[0], func(stmt *gorm.Statement) error {
+		currentSchema, _ := m.CurrentSchema(stmt, stmt.Table)
+		return m.DB.Raw("SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ?", currentSchema, "BASE TABLE").Scan(&currentTables).Error
+	})
+
+	tableName := map[string]bool{}
+	stmt := &gorm.Statement{DB: m.DB}
+	for i := len(values) - 1; i >= 0; i-- {
+		if table, ok := values[i].(string); ok {
+			tableName[table] = true
+		} else {
+			if err := stmt.ParseWithSpecialTableName(values[i], ""); err != nil {
+				return nil
+			}
+			tableName[stmt.Table] = true
+			stmt.Table = ""
+		}
+	}
+
+	for _, val := range currentTables {
+		if _, ok := tableName[val.TableName]; !ok {
+			excludedTables = append(excludedTables, val.TableName)
+		}
+	}
+
+	return excludedTables
 }
 
 func (m Migrator) CurrentSchema(stmt *gorm.Statement, table string) (interface{}, interface{}) {

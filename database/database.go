@@ -29,7 +29,7 @@ func MigrateAll(db *gorm.DB) error {
 
 	Migrator := lib.New(db)
 
-	if _, err := Migrator.AutoMigrate(
+	if _, _, err := Migrator.AutoMigrate(
 		&Test1{},
 		&Test2{},
 	); err != nil {
