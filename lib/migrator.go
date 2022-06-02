@@ -61,52 +61,28 @@ func (m Migrator) RunWithValue(value interface{}, fc func(*gorm.Statement) error
 	return fc(stmt)
 }
 
-// DataTypeOf return field's db data type
-func (m Migrator) DataTypeOf(field *schema.Field) string {
-	fieldValue := reflect.New(field.IndirectFieldType)
-	if dataTyper, ok := fieldValue.Interface().(GormDataTypeInterface); ok {
-		if dataType := dataTyper.GormDBDataType(m.DB, field); dataType != "" {
-			return dataType
-		}
-	}
-
-	return m.Dialector.DataTypeOf(field)
-}
-
-// FullDataTypeOf returns field's db full data type
-func (m Migrator) FullDataTypeOf(field *schema.Field) (expr clause.Expr) {
-	expr.SQL = m.DataTypeOf(field)
-
-	if field.NotNull {
-		expr.SQL += " NOT NULL"
-	}
-
-	if field.Unique {
-		expr.SQL += " UNIQUE"
-	}
-
-	if field.HasDefaultValue && (field.DefaultValueInterface != nil || field.DefaultValue != "") {
-		if field.DefaultValueInterface != nil {
-			defaultStmt := &gorm.Statement{Vars: []interface{}{field.DefaultValueInterface}}
-			m.Dialector.BindVarTo(defaultStmt, defaultStmt, field.DefaultValueInterface)
-			expr.SQL += " DEFAULT " + m.Dialector.Explain(defaultStmt.SQL.String(), field.DefaultValueInterface)
-		} else if field.DefaultValue != "(-)" {
-			expr.SQL += " DEFAULT " + field.DefaultValue
-		}
-	}
-
-	return
-}
-
 // AutoMigrate auto migrate values
-func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
+func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 	var migrationSQL string
+	var migrationSQLDrop string
 	taps := "\n\n\n"
+
+	excludedTables := m.ExcludedTable(values)
+	if len(excludedTables) > 0 {
+		migrationSQLDrop += "-- Drop Table \n"
+		for _, tableName := range excludedTables {
+			migrationSQLDrop += fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName)
+		}
+	}
+
 	for _, value := range m.ReorderModels(values, true) {
 		if !m.HasTable(value) {
-			migrationSQL += m.CreateTable(value) + taps
+			migrationSQL_, migrationSQLDrop_ := m.CreateTable(value)
+			migrationSQL += migrationSQL_ + taps
+			migrationSQLDrop += migrationSQLDrop_ + taps
 		} else {
 			var alterSchemaSQL string
+			var revertAlterSchemaSQL string
 			if err := m.RunWithValue(value, func(stmt *gorm.Statement) (errr error) {
 				columnTypes, err := m.ColumnTypes(value)
 				if err != nil {
@@ -117,10 +93,17 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
 					field := stmt.Schema.FieldsByDBName[dbName]
 					var foundColumn gorm.ColumnType
 
-					for _, columnType := range columnTypes {
-						if columnType.Name() == dbName {
+					for i, columnType := range columnTypes {
+						columnTypeName := columnType.Name()
+						if columnTypeName == dbName {
 							foundColumn = columnType
 							break
+						}
+						// check for column that have been removed from model and remove them in table
+						if _, ok := stmt.Schema.FieldsByDBName[columnTypeName]; !ok {
+							revertAlterSchemaSQL += m.DropColumn(stmt, columnTypeName)
+							// remove it from columnTypes
+							columnTypes = append(columnTypes[:i], columnTypes[i+1:]...)
 						}
 					}
 
@@ -131,69 +114,57 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
 						alterSchemaSQL += m.MigrateColumn(value, field, foundColumn)
 						// found, smart migrate
 					}
-				}
 
-				for _, rel := range stmt.Schema.Relationships.Relations {
-					if !m.DB.Config.DisableForeignKeyConstraintWhenMigrating {
-						if constraint := rel.ParseConstraint(); constraint != nil &&
-							constraint.Schema == stmt.Schema && !m.HasConstraint(value, constraint.Name) {
-							if err := m.CreateConstraint(value, constraint.Name); err != nil {
-								return err
-							}
-						}
-					}
-
-					for _, chk := range stmt.Schema.ParseCheckConstraints() {
-						if !m.HasConstraint(value, chk.Name) {
-							if err := m.CreateConstraint(value, chk.Name); err != nil {
-								return err
-							}
-						}
-					}
 				}
 
 				for _, idx := range stmt.Schema.ParseIndexes() {
 					if !m.HasIndex(value, idx.Name) {
-						alterSchemaSQL += m.CreateIndex(value, idx.Name)
+						createIndexSQLRaw_, downIndexSQLRaw_ := m.CreateIndex(value, idx.Name)
+						alterSchemaSQL += createIndexSQLRaw_
+						revertAlterSchemaSQL += downIndexSQLRaw_
 					}
 				}
 
 				return nil
 			}); err != nil {
-				return "", err
+				return "", "", err
 			}
 
 			migrationSQL += alterSchemaSQL + taps
+			migrationSQLDrop += revertAlterSchemaSQL + taps
 		}
 	}
 
-	if migrationSQL != taps {
-		return migrationSQL, nil
+	if strings.TrimSpace(migrationSQL) != "" || strings.TrimSpace(migrationSQLDrop) != "" {
+		return migrationSQL, migrationSQLDrop, nil
 	}
 
-	return "", nil
+	return "", "", nil
 }
 
 // CreateTable create table in database for values
-func (m Migrator) CreateTable(values ...interface{}) string {
+func (m Migrator) CreateTable(values ...interface{}) (string, string) {
 	var createTableSQLRaw string
+	var dropTableSQLRaw string
 	for _, value := range m.ReorderModels(values, false) {
 		if err := m.RunWithValue(value, func(stmt *gorm.Statement) (errr error) {
 			var (
 				createTableSQL          = "CREATE TABLE ? ("
+				dropTableSQL            = "DROP TABLE IF EXISTS ?"
 				values                  = []interface{}{m.CurrentTable(stmt)}
 				hasPrimaryKeyInDataType bool
 			)
 
 			//Add comment
 			createTableSQL = "-- Create Table \n" + createTableSQL
+			dropTableSQL = "-- Drop Table \n" + dropTableSQL
 
 			for _, dbName := range stmt.Schema.DBNames {
 				field := stmt.Schema.FieldsByDBName[dbName]
 				if !field.IgnoreMigration {
 					createTableSQL += "? ?"
 					hasPrimaryKeyInDataType = hasPrimaryKeyInDataType || strings.Contains(strings.ToUpper(string(field.DataType)), "PRIMARY KEY")
-					values = append(values, clause.Column{Name: dbName}, m.FullDataTypeOf(field))
+					values = append(values, clause.Column{Name: dbName}, m.DB.Migrator().FullDataTypeOf(field))
 					createTableSQL += ","
 				}
 			}
@@ -212,7 +183,8 @@ func (m Migrator) CreateTable(values ...interface{}) string {
 				if m.CreateIndexAfterCreateTable {
 					defer func(value interface{}, name string) {
 						if errr == nil {
-							createTableSQLRaw += m.CreateIndex(value, name)
+							createIndexSQLRaw_, _ := m.CreateIndex(value, name)
+							createTableSQLRaw += createIndexSQLRaw_
 						}
 					}(value, idx.Name)
 				} else {
@@ -260,30 +232,17 @@ func (m Migrator) CreateTable(values ...interface{}) string {
 			}
 
 			createTableSQLRaw += buildRawSQL(m.DB, createTableSQL, values...)
+			dropTableSQLRaw += buildRawSQL(m.DB, dropTableSQL, values...)
 			_ = createTableSQLRaw // TODO do something with this
 
 			//TODO: remove this
 			return nil
 		}); err != nil {
-			return ""
+			return "", ""
 		}
 	}
 
-	return createTableSQLRaw
-}
-
-// DropTable drop table for values
-func (m Migrator) DropTable(values ...interface{}) error {
-	values = m.ReorderModels(values, false)
-	for i := len(values) - 1; i >= 0; i-- {
-		tx := m.DB.Session(&gorm.Session{})
-		if err := m.RunWithValue(values[i], func(stmt *gorm.Statement) error {
-			return tx.Exec("DROP TABLE IF EXISTS ?", m.CurrentTable(stmt)).Error
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
+	return createTableSQLRaw, dropTableSQLRaw
 }
 
 // HasTable returns table exists or not for value, value could be a struct or string
@@ -294,6 +253,42 @@ func (m Migrator) HasTable(value interface{}) bool {
 		return m.DB.Raw("SELECT count(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ? AND table_type = ?", currentSchema, curTable, "BASE TABLE").Scan(&count).Error
 	})
 	return count > 0
+}
+
+// ExcludedTable returns list of excluded tables in the database.
+func (m Migrator) ExcludedTable(values []interface{}) []string {
+	type Tables struct {
+		TableName string
+	}
+
+	var currentTables []Tables
+	var excludedTables []string
+	m.RunWithValue(values[0], func(stmt *gorm.Statement) error {
+		currentSchema, _ := m.CurrentSchema(stmt, stmt.Table)
+		return m.DB.Raw("SELECT table_name FROM information_schema.tables WHERE table_schema = ? AND table_type = ?", currentSchema, "BASE TABLE").Scan(&currentTables).Error
+	})
+
+	tableName := map[string]bool{}
+	stmt := &gorm.Statement{DB: m.DB}
+	for i := len(values) - 1; i >= 0; i-- {
+		if table, ok := values[i].(string); ok {
+			tableName[table] = true
+		} else {
+			if err := stmt.ParseWithSpecialTableName(values[i], ""); err != nil {
+				return nil
+			}
+			tableName[stmt.Table] = true
+			stmt.Table = ""
+		}
+	}
+
+	for _, val := range currentTables {
+		if _, ok := tableName[val.TableName]; !ok {
+			excludedTables = append(excludedTables, val.TableName)
+		}
+	}
+
+	return excludedTables
 }
 
 func (m Migrator) CurrentSchema(stmt *gorm.Statement, table string) (interface{}, interface{}) {
@@ -322,7 +317,7 @@ func (m Migrator) AddColumn(value interface{}, name string) string {
 		}
 
 		if !f.IgnoreMigration {
-			addColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ADD ? ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: f.DBName}, m.DB.Migrator().FullDataTypeOf(f)})
+			addColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ADD ? ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: f.DBName}, m.DB.Migrator().FullDataTypeOf(f)}...)
 		}
 
 		return nil
@@ -331,16 +326,15 @@ func (m Migrator) AddColumn(value interface{}, name string) string {
 }
 
 // DropColumn drop value's `name` column
-func (m Migrator) DropColumn(value interface{}, name string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		if field := stmt.Schema.LookUpField(name); field != nil {
-			name = field.DBName
-		}
+func (m Migrator) DropColumn(stmt *gorm.Statement, name string) string {
+	var dropColumnRawSQL string
 
-		return m.DB.Exec(
-			"ALTER TABLE ? DROP COLUMN ?", m.CurrentTable(stmt), clause.Column{Name: name},
-		).Error
-	})
+	if field := stmt.Schema.LookUpField(name); field != nil {
+		name = field.DBName
+	}
+	dropColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? DROP COLUMN ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: name}}...)
+
+	return dropColumnRawSQL
 }
 
 // AlterColumn alter value's `field` column' type based on schema definition
@@ -348,8 +342,8 @@ func (m Migrator) AlterColumn(value interface{}, field string) string {
 	var alterColumnRawSQL string
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if field := stmt.Schema.LookUpField(field); field != nil {
-			fileType := m.FullDataTypeOf(field)
-			alterColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ALTER COLUMN ? TYPE ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: field.DBName}, fileType})
+			fileType := m.DB.Migrator().FullDataTypeOf(field)
+			alterColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ALTER COLUMN ? TYPE ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: field.DBName}, fileType}...)
 		}
 		return fmt.Errorf("failed to look up field with name: %s", field)
 	})
@@ -569,64 +563,6 @@ func (m Migrator) GuessConstraintAndTable(stmt *gorm.Statement, name string) (_ 
 	return nil, nil, stmt.Schema.Table
 }
 
-// CreateConstraint create constraint
-func (m Migrator) CreateConstraint(value interface{}, name string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
-		if chk != nil {
-			return m.DB.Exec(
-				"ALTER TABLE ? ADD CONSTRAINT ? CHECK (?)",
-				m.CurrentTable(stmt), clause.Column{Name: chk.Name}, clause.Expr{SQL: chk.Constraint},
-			).Error
-		}
-
-		if constraint != nil {
-			vars := []interface{}{clause.Table{Name: table}}
-			if stmt.TableExpr != nil {
-				vars[0] = stmt.TableExpr
-			}
-			sql, values := buildConstraint(constraint)
-			return m.DB.Exec("ALTER TABLE ? ADD "+sql, append(vars, values...)...).Error
-		}
-
-		return nil
-	})
-}
-
-// DropConstraint drop constraint
-func (m Migrator) DropConstraint(value interface{}, name string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
-		if constraint != nil {
-			name = constraint.Name
-		} else if chk != nil {
-			name = chk.Name
-		}
-		return m.DB.Exec("ALTER TABLE ? DROP CONSTRAINT ?", clause.Table{Name: table}, clause.Column{Name: name}).Error
-	})
-}
-
-// HasConstraint check has constraint or not
-func (m Migrator) HasConstraint(value interface{}, name string) bool {
-	var count int64
-	m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		currentDatabase := m.DB.Migrator().CurrentDatabase()
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
-		if constraint != nil {
-			name = constraint.Name
-		} else if chk != nil {
-			name = chk.Name
-		}
-
-		return m.DB.Raw(
-			"SELECT count(*) FROM INFORMATION_SCHEMA.table_constraints WHERE constraint_schema = ? AND table_name = ? AND constraint_name = ?",
-			currentDatabase, table, name,
-		).Row().Scan(&count)
-	})
-
-	return count > 0
-}
-
 // BuildIndexOptions build index options
 func (m Migrator) BuildIndexOptions(opts []schema.IndexOption, stmt *gorm.Statement) (results []interface{}) {
 	for _, opt := range opts {
@@ -655,14 +591,16 @@ type BuildIndexOptionsInterface interface {
 }
 
 // CreateIndex create index `name`
-func (m Migrator) CreateIndex(value interface{}, name string) string {
+func (m Migrator) CreateIndex(value interface{}, name string) (string, string) {
 	var createIndexRawSQL string
+	var dropIndexRawSQL string
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if idx := stmt.Schema.LookIndex(name); idx != nil {
 			opts := m.DB.Migrator().(BuildIndexOptionsInterface).BuildIndexOptions(idx.Fields, stmt)
 			values := []interface{}{clause.Column{Name: idx.Name}, m.CurrentTable(stmt), opts}
 
 			createIndexSQL := "CREATE "
+			dropIndexSQL := "DROP INDEX ?"
 			if idx.Class != "" {
 				createIndexSQL += idx.Class + " "
 			}
@@ -681,10 +619,11 @@ func (m Migrator) CreateIndex(value interface{}, name string) string {
 			}
 
 			createIndexRawSQL = buildRawSQL(m.DB, createIndexSQL, values...)
+			dropIndexRawSQL = buildRawSQL(m.DB, dropIndexSQL, values...)
 		}
 		return nil
 	})
-	return createIndexRawSQL
+	return createIndexRawSQL, dropIndexRawSQL
 }
 
 // DropIndex drop index `name`
