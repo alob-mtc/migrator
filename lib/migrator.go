@@ -93,10 +93,17 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 					field := stmt.Schema.FieldsByDBName[dbName]
 					var foundColumn gorm.ColumnType
 
-					for _, columnType := range columnTypes {
-						if columnType.Name() == dbName {
+					for i, columnType := range columnTypes {
+						columnTypeName := columnType.Name()
+						if columnTypeName == dbName {
 							foundColumn = columnType
 							break
+						}
+						// check for column that have been removed from model and remove them in table
+						if _, ok := stmt.Schema.FieldsByDBName[columnTypeName]; !ok {
+							revertAlterSchemaSQL += m.DropColumn(stmt, columnTypeName)
+							// remove it from columnTypes
+							columnTypes = append(columnTypes[:i], columnTypes[i+1:]...)
 						}
 					}
 
@@ -107,25 +114,7 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 						alterSchemaSQL += m.MigrateColumn(value, field, foundColumn)
 						// found, smart migrate
 					}
-				}
 
-				for _, rel := range stmt.Schema.Relationships.Relations {
-					if !m.DB.Config.DisableForeignKeyConstraintWhenMigrating {
-						if constraint := rel.ParseConstraint(); constraint != nil &&
-							constraint.Schema == stmt.Schema && !m.HasConstraint(value, constraint.Name) {
-							if err := m.CreateConstraint(value, constraint.Name); err != nil {
-								return err
-							}
-						}
-					}
-
-					for _, chk := range stmt.Schema.ParseCheckConstraints() {
-						if !m.HasConstraint(value, chk.Name) {
-							if err := m.CreateConstraint(value, chk.Name); err != nil {
-								return err
-							}
-						}
-					}
 				}
 
 				for _, idx := range stmt.Schema.ParseIndexes() {
@@ -146,7 +135,7 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 		}
 	}
 
-	if migrationSQL != taps || migrationSQLDrop != taps {
+	if strings.TrimSpace(migrationSQL) != "" || strings.TrimSpace(migrationSQLDrop) != "" {
 		return migrationSQL, migrationSQLDrop, nil
 	}
 
@@ -328,7 +317,7 @@ func (m Migrator) AddColumn(value interface{}, name string) string {
 		}
 
 		if !f.IgnoreMigration {
-			addColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ADD ? ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: f.DBName}, m.DB.Migrator().FullDataTypeOf(f)})
+			addColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ADD ? ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: f.DBName}, m.DB.Migrator().FullDataTypeOf(f)}...)
 		}
 
 		return nil
@@ -337,16 +326,15 @@ func (m Migrator) AddColumn(value interface{}, name string) string {
 }
 
 // DropColumn drop value's `name` column
-func (m Migrator) DropColumn(value interface{}, name string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		if field := stmt.Schema.LookUpField(name); field != nil {
-			name = field.DBName
-		}
+func (m Migrator) DropColumn(stmt *gorm.Statement, name string) string {
+	var dropColumnRawSQL string
 
-		return m.DB.Exec(
-			"ALTER TABLE ? DROP COLUMN ?", m.CurrentTable(stmt), clause.Column{Name: name},
-		).Error
-	})
+	if field := stmt.Schema.LookUpField(name); field != nil {
+		name = field.DBName
+	}
+	dropColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? DROP COLUMN ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: name}}...)
+
+	return dropColumnRawSQL
 }
 
 // AlterColumn alter value's `field` column' type based on schema definition
@@ -355,7 +343,7 @@ func (m Migrator) AlterColumn(value interface{}, field string) string {
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if field := stmt.Schema.LookUpField(field); field != nil {
 			fileType := m.DB.Migrator().FullDataTypeOf(field)
-			alterColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ALTER COLUMN ? TYPE ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: field.DBName}, fileType})
+			alterColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ALTER COLUMN ? TYPE ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: field.DBName}, fileType}...)
 		}
 		return fmt.Errorf("failed to look up field with name: %s", field)
 	})
@@ -573,64 +561,6 @@ func (m Migrator) GuessConstraintAndTable(stmt *gorm.Statement, name string) (_ 
 	}
 
 	return nil, nil, stmt.Schema.Table
-}
-
-// CreateConstraint create constraint
-func (m Migrator) CreateConstraint(value interface{}, name string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
-		if chk != nil {
-			return m.DB.Exec(
-				"ALTER TABLE ? ADD CONSTRAINT ? CHECK (?)",
-				m.CurrentTable(stmt), clause.Column{Name: chk.Name}, clause.Expr{SQL: chk.Constraint},
-			).Error
-		}
-
-		if constraint != nil {
-			vars := []interface{}{clause.Table{Name: table}}
-			if stmt.TableExpr != nil {
-				vars[0] = stmt.TableExpr
-			}
-			sql, values := buildConstraint(constraint)
-			return m.DB.Exec("ALTER TABLE ? ADD "+sql, append(vars, values...)...).Error
-		}
-
-		return nil
-	})
-}
-
-// DropConstraint drop constraint
-func (m Migrator) DropConstraint(value interface{}, name string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
-		if constraint != nil {
-			name = constraint.Name
-		} else if chk != nil {
-			name = chk.Name
-		}
-		return m.DB.Exec("ALTER TABLE ? DROP CONSTRAINT ?", clause.Table{Name: table}, clause.Column{Name: name}).Error
-	})
-}
-
-// HasConstraint check has constraint or not
-func (m Migrator) HasConstraint(value interface{}, name string) bool {
-	var count int64
-	m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		currentDatabase := m.DB.Migrator().CurrentDatabase()
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
-		if constraint != nil {
-			name = constraint.Name
-		} else if chk != nil {
-			name = chk.Name
-		}
-
-		return m.DB.Raw(
-			"SELECT count(*) FROM INFORMATION_SCHEMA.table_constraints WHERE constraint_schema = ? AND table_name = ? AND constraint_name = ?",
-			currentDatabase, table, name,
-		).Row().Scan(&count)
-	})
-
-	return count > 0
 }
 
 // BuildIndexOptions build index options
