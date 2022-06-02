@@ -266,7 +266,7 @@ func (m Migrator) HasTable(value interface{}) bool {
 	return count > 0
 }
 
-// HasTable returns table exists or not for value, value could be a struct or string
+// ExcludedTable returns list of excluded tables in the database.
 func (m Migrator) ExcludedTable(values []interface{}) []string {
 	type Tables struct {
 		TableName string
