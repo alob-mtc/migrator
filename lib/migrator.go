@@ -61,52 +61,19 @@ func (m Migrator) RunWithValue(value interface{}, fc func(*gorm.Statement) error
 	return fc(stmt)
 }
 
-// DataTypeOf return field's db data type
-func (m Migrator) DataTypeOf(field *schema.Field) string {
-	fieldValue := reflect.New(field.IndirectFieldType)
-	if dataTyper, ok := fieldValue.Interface().(GormDataTypeInterface); ok {
-		if dataType := dataTyper.GormDBDataType(m.DB, field); dataType != "" {
-			return dataType
-		}
-	}
-
-	return m.Dialector.DataTypeOf(field)
-}
-
-// FullDataTypeOf returns field's db full data type
-func (m Migrator) FullDataTypeOf(field *schema.Field) (expr clause.Expr) {
-	expr.SQL = m.DataTypeOf(field)
-
-	if field.NotNull {
-		expr.SQL += " NOT NULL"
-	}
-
-	if field.Unique {
-		expr.SQL += " UNIQUE"
-	}
-
-	if field.HasDefaultValue && (field.DefaultValueInterface != nil || field.DefaultValue != "") {
-		if field.DefaultValueInterface != nil {
-			defaultStmt := &gorm.Statement{Vars: []interface{}{field.DefaultValueInterface}}
-			m.Dialector.BindVarTo(defaultStmt, defaultStmt, field.DefaultValueInterface)
-			expr.SQL += " DEFAULT " + m.Dialector.Explain(defaultStmt.SQL.String(), field.DefaultValueInterface)
-		} else if field.DefaultValue != "(-)" {
-			expr.SQL += " DEFAULT " + field.DefaultValue
-		}
-	}
-
-	return
-}
-
 // AutoMigrate auto migrate values
 func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
 	var migrationSQL string
+	var migrationSQLDrop string
 	taps := "\n\n\n"
 	for _, value := range m.ReorderModels(values, true) {
 		if !m.HasTable(value) {
-			migrationSQL += m.CreateTable(value) + taps
+			migrationSQL_, migrationSQLDrop_ := m.CreateTable(value)
+			migrationSQL += migrationSQL_ + taps
+			migrationSQLDrop += migrationSQLDrop_ + taps
 		} else {
 			var alterSchemaSQL string
+			var revertAlterSchemaSQL string
 			if err := m.RunWithValue(value, func(stmt *gorm.Statement) (errr error) {
 				columnTypes, err := m.ColumnTypes(value)
 				if err != nil {
@@ -154,7 +121,9 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
 
 				for _, idx := range stmt.Schema.ParseIndexes() {
 					if !m.HasIndex(value, idx.Name) {
-						alterSchemaSQL += m.CreateIndex(value, idx.Name)
+						createIndexSQLRaw_, downIndexSQLRaw_ := m.CreateIndex(value, idx.Name)
+						alterSchemaSQL += createIndexSQLRaw_
+						revertAlterSchemaSQL += downIndexSQLRaw_
 					}
 				}
 
@@ -164,6 +133,7 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
 			}
 
 			migrationSQL += alterSchemaSQL + taps
+			migrationSQLDrop += revertAlterSchemaSQL + taps
 		}
 	}
 
@@ -175,25 +145,28 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, error) {
 }
 
 // CreateTable create table in database for values
-func (m Migrator) CreateTable(values ...interface{}) string {
+func (m Migrator) CreateTable(values ...interface{}) (string, string) {
 	var createTableSQLRaw string
+	var dropTableSQLRaw string
 	for _, value := range m.ReorderModels(values, false) {
 		if err := m.RunWithValue(value, func(stmt *gorm.Statement) (errr error) {
 			var (
 				createTableSQL          = "CREATE TABLE ? ("
+				dropTableSQL            = "DROP TABLE ?"
 				values                  = []interface{}{m.CurrentTable(stmt)}
 				hasPrimaryKeyInDataType bool
 			)
 
 			//Add comment
 			createTableSQL = "-- Create Table \n" + createTableSQL
+			dropTableSQL = "-- Drop Table \n" + dropTableSQL
 
 			for _, dbName := range stmt.Schema.DBNames {
 				field := stmt.Schema.FieldsByDBName[dbName]
 				if !field.IgnoreMigration {
 					createTableSQL += "? ?"
 					hasPrimaryKeyInDataType = hasPrimaryKeyInDataType || strings.Contains(strings.ToUpper(string(field.DataType)), "PRIMARY KEY")
-					values = append(values, clause.Column{Name: dbName}, m.FullDataTypeOf(field))
+					values = append(values, clause.Column{Name: dbName}, m.DB.Migrator().FullDataTypeOf(field))
 					createTableSQL += ","
 				}
 			}
@@ -212,7 +185,8 @@ func (m Migrator) CreateTable(values ...interface{}) string {
 				if m.CreateIndexAfterCreateTable {
 					defer func(value interface{}, name string) {
 						if errr == nil {
-							createTableSQLRaw += m.CreateIndex(value, name)
+							createIndexSQLRaw_, _ := m.CreateIndex(value, name)
+							createTableSQLRaw += createIndexSQLRaw_
 						}
 					}(value, idx.Name)
 				} else {
@@ -260,16 +234,17 @@ func (m Migrator) CreateTable(values ...interface{}) string {
 			}
 
 			createTableSQLRaw += buildRawSQL(m.DB, createTableSQL, values...)
+			dropTableSQLRaw += buildRawSQL(m.DB, dropTableSQL, values...)
 			_ = createTableSQLRaw // TODO do something with this
 
 			//TODO: remove this
 			return nil
 		}); err != nil {
-			return ""
+			return "", ""
 		}
 	}
 
-	return createTableSQLRaw
+	return createTableSQLRaw, dropTableSQLRaw
 }
 
 // DropTable drop table for values
@@ -348,7 +323,7 @@ func (m Migrator) AlterColumn(value interface{}, field string) string {
 	var alterColumnRawSQL string
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if field := stmt.Schema.LookUpField(field); field != nil {
-			fileType := m.FullDataTypeOf(field)
+			fileType := m.DB.Migrator().FullDataTypeOf(field)
 			alterColumnRawSQL = buildRawSQL(m.DB, "ALTER TABLE ? ALTER COLUMN ? TYPE ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: field.DBName}, fileType})
 		}
 		return fmt.Errorf("failed to look up field with name: %s", field)
@@ -655,14 +630,16 @@ type BuildIndexOptionsInterface interface {
 }
 
 // CreateIndex create index `name`
-func (m Migrator) CreateIndex(value interface{}, name string) string {
+func (m Migrator) CreateIndex(value interface{}, name string) (string, string) {
 	var createIndexRawSQL string
+	var dropIndexRawSQL string
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if idx := stmt.Schema.LookIndex(name); idx != nil {
 			opts := m.DB.Migrator().(BuildIndexOptionsInterface).BuildIndexOptions(idx.Fields, stmt)
 			values := []interface{}{clause.Column{Name: idx.Name}, m.CurrentTable(stmt), opts}
 
 			createIndexSQL := "CREATE "
+			dropIndexSQL := "DROP INDEX ?"
 			if idx.Class != "" {
 				createIndexSQL += idx.Class + " "
 			}
@@ -681,10 +658,11 @@ func (m Migrator) CreateIndex(value interface{}, name string) string {
 			}
 
 			createIndexRawSQL = buildRawSQL(m.DB, createIndexSQL, values...)
+			dropIndexRawSQL = buildRawSQL(m.DB, dropIndexSQL, values...)
 		}
 		return nil
 	})
-	return createIndexRawSQL
+	return createIndexRawSQL, dropIndexRawSQL
 }
 
 // DropIndex drop index `name`
