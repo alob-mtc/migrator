@@ -28,14 +28,15 @@ func MigrateAll(db *gorm.DB) error {
 	fmt.Println("Migration started")
 
 	Migrator := lib.New(db)
-
-	if _, _, err := Migrator.AutoMigrate(
+	a, b, err := Migrator.AutoMigrate(
 		&Test1{},
 		&Test2{},
-	); err != nil {
+		//&User{},
+	)
+	if err != nil {
 		return err
 	}
 
-	fmt.Println("Migration ended")
+	fmt.Println("Migration ended:\n", a, b)
 	return nil
 }

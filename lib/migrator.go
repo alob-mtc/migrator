@@ -71,7 +71,7 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 	if len(excludedTables) > 0 {
 		migrationSQLDrop += "-- Drop Table \n"
 		for _, tableName := range excludedTables {
-			migrationSQLDrop += fmt.Sprintf("DROP TABLE IF EXISTS %s", tableName)
+			migrationSQLDrop += fmt.Sprintf("DROP TABLE IF EXISTS %s\n", tableName)
 		}
 	}
 
@@ -88,28 +88,31 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 				if err != nil {
 					return err
 				}
-
+				removedColumnMap := map[string]bool{}
 				for _, dbName := range stmt.Schema.DBNames {
 					field := stmt.Schema.FieldsByDBName[dbName]
 					var foundColumn gorm.ColumnType
 
-					for i, columnType := range columnTypes {
+					for _, columnType := range columnTypes {
 						columnTypeName := columnType.Name()
 						if columnTypeName == dbName {
 							foundColumn = columnType
 							break
 						}
 						// check for column that have been removed from model and remove them in table
-						if _, ok := stmt.Schema.FieldsByDBName[columnTypeName]; !ok {
+						_, foundInFieldsByDBName := stmt.Schema.FieldsByDBName[columnTypeName]
+						_, removedColumn := removedColumnMap[columnTypeName]
+						if !foundInFieldsByDBName && !removedColumn {
 							revertAlterSchemaSQL += m.DropColumn(stmt, columnTypeName)
-							// remove it from columnTypes
-							columnTypes = append(columnTypes[:i], columnTypes[i+1:]...)
+							// make it has removed
+							removedColumnMap[columnTypeName] = true
 						}
 					}
 
 					if foundColumn == nil {
 						// not found, add column
 						alterSchemaSQL += m.AddColumn(value, dbName)
+						revertAlterSchemaSQL += m.DropColumn(stmt, dbName)
 					} else {
 						alterSchemaSQL += m.MigrateColumn(value, field, foundColumn)
 						// found, smart migrate
@@ -369,24 +372,6 @@ func (m Migrator) HasColumn(value interface{}, field string) bool {
 	return count > 0
 }
 
-// RenameColumn rename value's field name from oldName to newName
-func (m Migrator) RenameColumn(value interface{}, oldName, newName string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		if field := stmt.Schema.LookUpField(oldName); field != nil {
-			oldName = field.DBName
-		}
-
-		if field := stmt.Schema.LookUpField(newName); field != nil {
-			newName = field.DBName
-		}
-
-		return m.DB.Exec(
-			"ALTER TABLE ? RENAME COLUMN ? TO ?",
-			m.CurrentTable(stmt), clause.Column{Name: oldName}, clause.Column{Name: newName},
-		).Error
-	})
-}
-
 // MigrateColumn migrate column
 func (m Migrator) MigrateColumn(value interface{}, field *schema.Field, columnType gorm.ColumnType) string {
 	// found, smart migrate
@@ -458,10 +443,11 @@ func (m Migrator) MigrateColumn(value interface{}, field *schema.Field, columnTy
 }
 
 // ColumnTypes return columnTypes []gorm.ColumnType and execErr error
+// TODO: rewrite this function
 func (m Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
 	columnTypes := make([]gorm.ColumnType, 0)
 	execErr := m.RunWithValue(value, func(stmt *gorm.Statement) (err error) {
-		rows, err := m.DB.Session(&gorm.Session{}).Table(stmt.Table).Limit(1).Rows()
+		rows, err := m.DB.Session(&gorm.Session{}).Table(stmt.Table).Rows()
 		if err != nil {
 			return err
 		}
@@ -596,7 +582,7 @@ func (m Migrator) CreateIndex(value interface{}, name string) (string, string) {
 	var dropIndexRawSQL string
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if idx := stmt.Schema.LookIndex(name); idx != nil {
-			opts := m.DB.Migrator().(BuildIndexOptionsInterface).BuildIndexOptions(idx.Fields, stmt)
+			opts := m.BuildIndexOptions(idx.Fields, stmt)
 			values := []interface{}{clause.Column{Name: idx.Name}, m.CurrentTable(stmt), opts}
 
 			createIndexSQL := "CREATE "
@@ -626,17 +612,6 @@ func (m Migrator) CreateIndex(value interface{}, name string) (string, string) {
 	return createIndexRawSQL, dropIndexRawSQL
 }
 
-// DropIndex drop index `name`
-func (m Migrator) DropIndex(value interface{}, name string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		if idx := stmt.Schema.LookIndex(name); idx != nil {
-			name = idx.Name
-		}
-
-		return m.DB.Exec("DROP INDEX ? ON ?", clause.Column{Name: name}, m.CurrentTable(stmt)).Error
-	})
-}
-
 // HasIndex check has index `name` or not
 func (m Migrator) HasIndex(value interface{}, name string) bool {
 	var count int64
@@ -651,16 +626,6 @@ func (m Migrator) HasIndex(value interface{}, name string) bool {
 	})
 
 	return count > 0
-}
-
-// RenameIndex rename index from oldName to newName
-func (m Migrator) RenameIndex(value interface{}, oldName, newName string) error {
-	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		return m.DB.Exec(
-			"ALTER TABLE ? RENAME INDEX ? TO ?",
-			m.CurrentTable(stmt), clause.Column{Name: oldName}, clause.Column{Name: newName},
-		).Error
-	})
 }
 
 // CurrentDatabase returns current database name
@@ -777,12 +742,13 @@ func (m Migrator) CurrentTable(stmt *gorm.Statement) interface{} {
 }
 
 func buildRawSQL(db *gorm.DB, sql string, values ...interface{}) string {
-	db.Statement.SQL = strings.Builder{}
+	stmt := &gorm.Statement{DB: db}
+	stmt.SQL = strings.Builder{}
 	if strings.Contains(sql, "@") {
-		clause.NamedExpr{SQL: sql, Vars: values}.Build(db.Statement)
+		clause.NamedExpr{SQL: sql, Vars: values}.Build(stmt)
 	} else {
-		clause.Expr{SQL: sql, Vars: values}.Build(db.Statement)
+		clause.Expr{SQL: sql, Vars: values}.Build(stmt)
 	}
 
-	return db.Statement.SQL.String() + "; \n"
+	return stmt.SQL.String() + "; \n"
 }
