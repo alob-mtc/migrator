@@ -100,14 +100,6 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 							foundColumn = columnType
 							break
 						}
-						// check for column that have been removed from model and remove them in table
-						_, foundInFieldsByDBName := stmt.Schema.FieldsByDBName[columnTypeName]
-						_, removedColumn := removedColumnMap[columnTypeName]
-						if !foundInFieldsByDBName && !removedColumn {
-							revertAlterSchemaSQL += m.DropColumn(stmt, columnTypeName)
-							// make it has removed
-							removedColumnMap[columnTypeName] = true
-						}
 					}
 
 					if foundColumn == nil {
@@ -118,6 +110,18 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 					} else {
 						alterSchemaSQL += m.MigrateColumn(value, field, foundColumn)
 						// found, smart migrate
+					}
+
+					// check for column that have been removed from model and remove them in table
+					for _, columnType := range columnTypes {
+						columnTypeName := columnType.Name()
+						_, foundInFieldsByDBName := stmt.Schema.FieldsByDBName[columnTypeName]
+						_, removedColumn := removedColumnMap[columnTypeName]
+						if !foundInFieldsByDBName && !removedColumn {
+							revertAlterSchemaSQL += m.DropColumn(stmt, columnTypeName)
+							// make it has removed
+							removedColumnMap[columnTypeName] = true
+						}
 					}
 
 				}
