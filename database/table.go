@@ -8,7 +8,8 @@ import (
 type Test1 struct {
 	ID        string `gorm:"primaryKey;"`
 	CreatedAt time.Time
-	UpdatedAt time.Time
+	UpdatedAt time.Time      `gorm:"index"`
+	After     time.Time      `gorm:"index"`
 	DeletedAt gorm.DeletedAt `gorm:"index"`
 	Name      string         `gorm:"index; not null"`
 	//Active    *bool          `gorm:"index; not null; default:false"`

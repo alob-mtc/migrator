@@ -89,6 +89,7 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 					return err
 				}
 				removedColumnMap := map[string]bool{}
+				foundColumnMap := map[string]bool{}
 				for _, dbName := range stmt.Schema.DBNames {
 					field := stmt.Schema.FieldsByDBName[dbName]
 					var foundColumn gorm.ColumnType
@@ -111,6 +112,7 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 
 					if foundColumn == nil {
 						// not found, add column
+						foundColumnMap[dbName] = true
 						alterSchemaSQL += m.AddColumn(value, dbName)
 						revertAlterSchemaSQL += m.DropColumn(stmt, dbName)
 					} else {
@@ -124,7 +126,9 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 					if !m.HasIndex(value, idx.Name) {
 						createIndexSQLRaw_, downIndexSQLRaw_ := m.CreateIndex(value, idx.Name)
 						alterSchemaSQL += createIndexSQLRaw_
-						revertAlterSchemaSQL += downIndexSQLRaw_
+						if _, found := foundColumnMap[idx.Fields[0].DBName]; !found {
+							revertAlterSchemaSQL += downIndexSQLRaw_
+						}
 					}
 				}
 
