@@ -1,4 +1,4 @@
-package lib
+package migrator
 
 import (
 	"context"
@@ -21,6 +21,7 @@ var (
 // Migrator m struct
 type Migrator struct {
 	Config
+	Models []interface{}
 }
 
 // Config schema config
@@ -37,15 +38,21 @@ type GormDataTypeInterface interface {
 
 func New(db *gorm.DB) *Migrator {
 	return &Migrator{
-		Config{
+		Config: Config{
 			CreateIndexAfterCreateTable: true,
 			DB:                          db,
 		},
+		Models: []interface{}{},
 	}
 }
 
+// RegisterModel run migration with statement value
+func (m *Migrator) RegisterModel(values ...interface{}) {
+	m.Models = append(m.Models, values...)
+}
+
 // RunWithValue run migration with statement value
-func (m Migrator) RunWithValue(value interface{}, fc func(*gorm.Statement) error) error {
+func (m *Migrator) RunWithValue(value interface{}, fc func(*gorm.Statement) error) error {
 	stmt := &gorm.Statement{DB: m.DB}
 	if m.DB.Statement != nil {
 		stmt.Table = m.DB.Statement.Table
@@ -62,24 +69,26 @@ func (m Migrator) RunWithValue(value interface{}, fc func(*gorm.Statement) error
 }
 
 // AutoMigrate auto migrate values
-func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
-	var migrationSQL string
-	var migrationSQLDrop string
-	taps := "\n\n\n"
-
-	excludedTables := m.ExcludedTable(values)
+func (m *Migrator) AutoMigrate() (string, string, error) {
+	var migrationSQLUp string
+	var migrationSQLUpDown string
+	taps := "\n"
+	excludedTables := m.ExcludedTable(m.Models)
 	if len(excludedTables) > 0 {
-		migrationSQLDrop += "-- Drop Table \n"
 		for _, tableName := range excludedTables {
-			migrationSQLDrop += fmt.Sprintf("DROP TABLE IF EXISTS %s\n", tableName)
+			if tableName == "schema_migrations" {
+				continue
+			}
+			migrationSQLUpDown += "-- Drop Table \n"
+			migrationSQLUpDown += fmt.Sprintf("DROP TABLE IF EXISTS %s\n", tableName)
 		}
 	}
 
-	for _, value := range m.ReorderModels(values, true) {
+	for _, value := range m.ReorderModels(m.Models, true) {
 		if !m.HasTable(value) {
-			migrationSQL_, migrationSQLDrop_ := m.CreateTable(value)
-			migrationSQL += migrationSQL_ + taps
-			migrationSQLDrop += migrationSQLDrop_ + taps
+			migrationSQLUp_, migrationSQLUpDown_ := m.CreateTable(value)
+			migrationSQLUp += migrationSQLUp_ + taps
+			migrationSQLUpDown += migrationSQLUpDown_ + taps
 		} else {
 			var alterSchemaSQL string
 			var revertAlterSchemaSQL string
@@ -108,7 +117,7 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 						alterSchemaSQL += m.AddColumn(value, dbName)
 						revertAlterSchemaSQL += m.DropColumn(stmt, dbName)
 					} else {
-						alterSchemaSQL += m.MigrateColumn(value, field, foundColumn)
+						alterSchemaSQL += m.MigrateColumn(value, field, foundColumn, stmt)
 						// found, smart migrate
 					}
 
@@ -118,7 +127,8 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 						_, foundInFieldsByDBName := stmt.Schema.FieldsByDBName[columnTypeName]
 						_, removedColumn := removedColumnMap[columnTypeName]
 						if !foundInFieldsByDBName && !removedColumn {
-							revertAlterSchemaSQL += m.DropColumn(stmt, columnTypeName)
+							migrationSQLUp += m.DropColumn(stmt, columnTypeName)
+							migrationSQLUpDown += m.AddColumn(value, dbName)
 							// make it has removed
 							removedColumnMap[columnTypeName] = true
 						}
@@ -141,20 +151,20 @@ func (m Migrator) AutoMigrate(values ...interface{}) (string, string, error) {
 				return "", "", err
 			}
 
-			migrationSQL += alterSchemaSQL + taps
-			migrationSQLDrop += revertAlterSchemaSQL + taps
+			migrationSQLUp += alterSchemaSQL + taps
+			migrationSQLUpDown += revertAlterSchemaSQL + taps
 		}
 	}
 
-	if strings.TrimSpace(migrationSQL) != "" || strings.TrimSpace(migrationSQLDrop) != "" {
-		return migrationSQL, migrationSQLDrop, nil
+	if strings.TrimSpace(migrationSQLUp) != "" || strings.TrimSpace(migrationSQLUpDown) != "" {
+		return migrationSQLUp, migrationSQLUpDown, nil
 	}
 
 	return "", "", nil
 }
 
 // CreateTable create table in database for values
-func (m Migrator) CreateTable(values ...interface{}) (string, string) {
+func (m *Migrator) CreateTable(values ...interface{}) (string, string) {
 	var createTableSQLRaw string
 	var dropTableSQLRaw string
 	for _, value := range m.ReorderModels(values, false) {
@@ -257,7 +267,7 @@ func (m Migrator) CreateTable(values ...interface{}) (string, string) {
 }
 
 // HasTable returns table exists or not for value, value could be a struct or string
-func (m Migrator) HasTable(value interface{}) bool {
+func (m *Migrator) HasTable(value interface{}) bool {
 	var count int64
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		currentSchema, curTable := m.CurrentSchema(stmt, stmt.Table)
@@ -267,7 +277,7 @@ func (m Migrator) HasTable(value interface{}) bool {
 }
 
 // ExcludedTable returns list of excluded tables in the database.
-func (m Migrator) ExcludedTable(values []interface{}) []string {
+func (m *Migrator) ExcludedTable(values []interface{}) []string {
 	type Tables struct {
 		TableName string
 	}
@@ -302,7 +312,7 @@ func (m Migrator) ExcludedTable(values []interface{}) []string {
 	return excludedTables
 }
 
-func (m Migrator) CurrentSchema(stmt *gorm.Statement, table string) (interface{}, interface{}) {
+func (m *Migrator) CurrentSchema(stmt *gorm.Statement, table string) (interface{}, interface{}) {
 	if strings.Contains(table, ".") {
 		if tables := strings.Split(table, `.`); len(tables) == 2 {
 			return tables[0], tables[1]
@@ -318,7 +328,7 @@ func (m Migrator) CurrentSchema(stmt *gorm.Statement, table string) (interface{}
 }
 
 // AddColumn create `name` column for value
-func (m Migrator) AddColumn(value interface{}, name string) string {
+func (m *Migrator) AddColumn(value interface{}, name string) string {
 	var addColumnRawSQL string
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		// avoid using the same name field
@@ -337,7 +347,7 @@ func (m Migrator) AddColumn(value interface{}, name string) string {
 }
 
 // DropColumn drop value's `name` column
-func (m Migrator) DropColumn(stmt *gorm.Statement, name string) string {
+func (m *Migrator) DropColumn(stmt *gorm.Statement, name string) string {
 	var dropColumnRawSQL string
 
 	if field := stmt.Schema.LookUpField(name); field != nil {
@@ -349,7 +359,7 @@ func (m Migrator) DropColumn(stmt *gorm.Statement, name string) string {
 }
 
 // AlterColumn alter value's `field` column' type based on schema definition
-func (m Migrator) AlterColumn(value interface{}, field string) string {
+func (m *Migrator) AlterColumn(value interface{}, field string) string {
 	var alterColumnRawSQL string
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if field := stmt.Schema.LookUpField(field); field != nil {
@@ -362,7 +372,7 @@ func (m Migrator) AlterColumn(value interface{}, field string) string {
 }
 
 // HasColumn check has column `field` for value or not
-func (m Migrator) HasColumn(value interface{}, field string) bool {
+func (m *Migrator) HasColumn(value interface{}, field string) bool {
 	var count int64
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		currentDatabase := m.DB.Migrator().CurrentDatabase()
@@ -381,7 +391,7 @@ func (m Migrator) HasColumn(value interface{}, field string) bool {
 }
 
 // MigrateColumn migrate column
-func (m Migrator) MigrateColumn(value interface{}, field *schema.Field, columnType gorm.ColumnType) string {
+func (m *Migrator) MigrateColumn(value interface{}, field *schema.Field, columnType gorm.ColumnType, stmt *gorm.Statement) string {
 	// found, smart migrate
 	fullDataType := strings.ToLower(m.DB.Migrator().FullDataTypeOf(field).SQL)
 	realDataType := strings.ToLower(columnType.DatabaseTypeName())
@@ -452,7 +462,7 @@ func (m Migrator) MigrateColumn(value interface{}, field *schema.Field, columnTy
 
 // ColumnTypes return columnTypes []gorm.ColumnType and execErr error
 // TODO: rewrite this function
-func (m Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
+func (m *Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
 	columnTypes := make([]gorm.ColumnType, 0)
 	execErr := m.RunWithValue(value, func(stmt *gorm.Statement) (err error) {
 		rows, err := m.DB.Session(&gorm.Session{}).Table(stmt.Table).Rows()
@@ -481,12 +491,12 @@ func (m Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
 }
 
 // CreateView create view
-func (m Migrator) CreateView(name string, option gorm.ViewOption) error {
+func (m *Migrator) CreateView(name string, option gorm.ViewOption) error {
 	return gorm.ErrNotImplemented
 }
 
 // DropView drop view
-func (m Migrator) DropView(name string) error {
+func (m *Migrator) DropView(name string) error {
 	return gorm.ErrNotImplemented
 }
 
@@ -513,7 +523,7 @@ func buildConstraint(constraint *schema.Constraint) (sql string, results []inter
 }
 
 // GuessConstraintAndTable guess statement's constraint and it's table based on name
-func (m Migrator) GuessConstraintAndTable(stmt *gorm.Statement, name string) (_ *schema.Constraint, _ *schema.Check, table string) {
+func (m *Migrator) GuessConstraintAndTable(stmt *gorm.Statement, name string) (_ *schema.Constraint, _ *schema.Check, table string) {
 	if stmt.Schema == nil {
 		return nil, nil, stmt.Table
 	}
@@ -558,7 +568,7 @@ func (m Migrator) GuessConstraintAndTable(stmt *gorm.Statement, name string) (_ 
 }
 
 // BuildIndexOptions build index options
-func (m Migrator) BuildIndexOptions(opts []schema.IndexOption, stmt *gorm.Statement) (results []interface{}) {
+func (m *Migrator) BuildIndexOptions(opts []schema.IndexOption, stmt *gorm.Statement) (results []interface{}) {
 	for _, opt := range opts {
 		str := stmt.Quote(opt.DBName)
 		if opt.Expression != "" {
@@ -585,7 +595,7 @@ type BuildIndexOptionsInterface interface {
 }
 
 // CreateIndex create index `name`
-func (m Migrator) CreateIndex(value interface{}, name string) (string, string) {
+func (m *Migrator) CreateIndex(value interface{}, name string) (string, string) {
 	var createIndexRawSQL string
 	var dropIndexRawSQL string
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
@@ -621,7 +631,7 @@ func (m Migrator) CreateIndex(value interface{}, name string) (string, string) {
 }
 
 // HasIndex check has index `name` or not
-func (m Migrator) HasIndex(value interface{}, name string) bool {
+func (m *Migrator) HasIndex(value interface{}, name string) bool {
 	var count int64
 	m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if idx := stmt.Schema.LookIndex(name); idx != nil {
@@ -637,13 +647,13 @@ func (m Migrator) HasIndex(value interface{}, name string) bool {
 }
 
 // CurrentDatabase returns current database name
-func (m Migrator) CurrentDatabase() (name string) {
+func (m *Migrator) CurrentDatabase() (name string) {
 	m.DB.Raw("SELECT DATABASE()").Row().Scan(&name)
 	return
 }
 
 // ReorderModels reorder models according to constraint dependencies
-func (m Migrator) ReorderModels(values []interface{}, autoAdd bool) (results []interface{}) {
+func (m *Migrator) ReorderModels(values []interface{}, autoAdd bool) (results []interface{}) {
 	type Dependency struct {
 		*gorm.Statement
 		Depends []*schema.Schema
@@ -741,8 +751,19 @@ func (m Migrator) ReorderModels(values []interface{}, autoAdd bool) (results []i
 	return
 }
 
+// DataTypeOf return field's db data type
+func (m *Migrator) DataTypeOf(field *schema.Field) string {
+	fieldValue := reflect.New(field.IndirectFieldType)
+	if dataTyper, ok := fieldValue.Interface().(GormDataTypeInterface); ok {
+		if dataType := dataTyper.GormDBDataType(m.DB, field); dataType != "" {
+			return dataType
+		}
+	}
+	return m.Dialector.DataTypeOf(field)
+}
+
 // CurrentTable returns current statement's table expression
-func (m Migrator) CurrentTable(stmt *gorm.Statement) interface{} {
+func (m *Migrator) CurrentTable(stmt *gorm.Statement) interface{} {
 	if stmt.TableExpr != nil {
 		return *stmt.TableExpr
 	}

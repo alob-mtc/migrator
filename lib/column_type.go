@@ -1,4 +1,4 @@
-package lib
+package migrator
 
 import (
 	"database/sql"
