@@ -121,19 +121,19 @@ func (m *Migrator) AutoMigrate() (string, string, error) {
 						// found, smart migrate
 					}
 
-					// check for column that have been removed from model and remove them in table
-					for _, columnType := range columnTypes {
-						columnTypeName := columnType.Name()
-						_, foundInFieldsByDBName := stmt.Schema.FieldsByDBName[columnTypeName]
-						_, removedColumn := removedColumnMap[columnTypeName]
-						if !foundInFieldsByDBName && !removedColumn {
-							migrationSQLUp += m.DropColumn(stmt, columnTypeName)
-							migrationSQLUpDown += m.AddColumn(value, dbName)
-							// make it has removed
-							removedColumnMap[columnTypeName] = true
-						}
+				}
+				// check for column that have been removed from model and remove them in table
+				for _, columnType := range columnTypes {
+					columnTypeName := columnType.Name()
+					_, foundInFieldsByDBName := stmt.Schema.FieldsByDBName[columnTypeName]
+					_, removedColumn := removedColumnMap[columnTypeName]
+					if !foundInFieldsByDBName && !removedColumn {
+						migrationSQLUp += m.DropColumn(stmt, columnTypeName)
+						// TODO: add the sql type
+						migrationSQLUpDown += buildRawSQL(m.DB, "ALTER TABLE ? ADD ?", []interface{}{m.CurrentTable(stmt), clause.Column{Name: columnTypeName}}...)
+						// make it has removed
+						removedColumnMap[columnTypeName] = true
 					}
-
 				}
 
 				for _, idx := range stmt.Schema.ParseIndexes() {
@@ -462,8 +462,8 @@ func (m *Migrator) MigrateColumn(value interface{}, field *schema.Field, columnT
 
 // ColumnTypes return columnTypes []gorm.ColumnType and execErr error
 // TODO: rewrite this function
-func (m *Migrator) ColumnTypes(value interface{}) ([]gorm.ColumnType, error) {
-	columnTypes := make([]gorm.ColumnType, 0)
+func (m *Migrator) ColumnTypes(value interface{}) ([]ColumnType, error) {
+	columnTypes := make([]ColumnType, 0)
 	execErr := m.RunWithValue(value, func(stmt *gorm.Statement) (err error) {
 		rows, err := m.DB.Session(&gorm.Session{}).Table(stmt.Table).Rows()
 		if err != nil {

@@ -2,6 +2,7 @@ package migrator
 
 import (
 	"database/sql"
+	"fmt"
 	"reflect"
 )
 
@@ -104,4 +105,23 @@ func (ct ColumnType) Comment() (value string, ok bool) {
 // DefaultValue returns the default value of current column.
 func (ct ColumnType) DefaultValue() (value string, ok bool) {
 	return ct.DefaultValueValue.String, ct.DefaultValueValue.Valid
+}
+
+// GetTypeToSQL returns the full type and default value of current column is SQL type.
+func (ct ColumnType) GetTypeToSQL() string {
+	var SQL string
+	fmt.Println(ct)
+	if nullable, ok := ct.Nullable(); ok && nullable {
+		SQL += " NOT NULL"
+	}
+
+	if unique, ok := ct.Unique(); ok && unique {
+		SQL += " UNIQUE"
+	}
+
+	if defaultValues, ok := ct.DefaultValue(); ok && defaultValues == "" {
+		SQL += " DEFAULT " + defaultValues
+	}
+
+	return SQL
 }
