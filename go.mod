@@ -1,4 +1,4 @@
-module github.com/alobmtc/migrator
+module github.com/alob-mtc/migrator
 
 go 1.18
 
