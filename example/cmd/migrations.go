@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/alobmtc/migrator/example/table"
-	migrator "github.com/alobmtc/migrator/lib"
+	"github.com/alob-mtc/migrator/example/table"
+	migrator "github.com/alob-mtc/migrator/lib"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"gorm.io/driver/postgres"

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/alobmtc/migrator/example/cmd"
+	"github.com/alob-mtc/migrator/example/cmd"
 	"github.com/spf13/cobra"
 )
 
