@@ -157,6 +157,8 @@ func (m *Migrator) AutoMigrate() (string, string, error) {
 	}
 
 	if strings.TrimSpace(migrationSQLUp) != "" || strings.TrimSpace(migrationSQLUpDown) != "" {
+		migrationSQLUp = "BEGIN;\n\n" + migrationSQLUp + "\nCOMMIT;"
+		migrationSQLUpDown = "BEGIN;\n\n" + migrationSQLUpDown + "\nCOMMIT;"
 		return migrationSQLUp, migrationSQLUpDown, nil
 	}
 
