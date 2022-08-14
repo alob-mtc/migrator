@@ -16,7 +16,7 @@ import (
 var (
 	regRealDataType = regexp.MustCompile(`[^\d](\d+)[^\d]?`)
 	regFullDataType = regexp.MustCompile(`[^\d]*(\d+)[^\d]?`)
-	DefaultMigrationsFolder = "migrations/sql"
+	defaultMigrationsFolder = "migrations/sql"
 )
 
 // Migrator m struct
@@ -39,7 +39,7 @@ type GormDataTypeInterface interface {
 }
 
 func New(db *gorm.DB, migrationFolder ...string) *Migrator {
-	migrationPath := DefaultMigrationsFolder
+	migrationPath := defaultMigrationsFolder
 	if len(migrationFolder) > 0 {
 		migrationPath = migrationFolder[0]
 	}
