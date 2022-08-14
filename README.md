@@ -130,7 +130,21 @@ func main() {
 
 ### Rolling Back Migrations
 
-TODO:
+```go
+//.....
+
+func main() {
+
+	//.....
+
+	err = newMigrator.Run(db, "down")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+}
+
+```
 
 ## Internals
 
