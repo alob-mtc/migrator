@@ -1,25 +1,32 @@
 package migrator
 
 import (
-	"flag"
 	"fmt"
+	"log"
+	"os"
+	"time"
+
 	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database"
+	"github.com/golang-migrate/migrate/v4/database/mysql"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/database/sqlite"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	_ "github.com/lib/pq"
 	"gorm.io/gorm"
-	"log"
-	"os"
-	"strconv"
-	"time"
 )
 
 const (
 	DefaultMigrationsFolder = "migrations/sql/"
 )
 
-func (mig *Migrator) Run(db *gorm.DB, args []string, migrationFolder ...string) error {
+func (mig *Migrator) Run(db *gorm.DB, command string, migrationname string, migrationFolder ...string) error {
 	var err error
+	var driver database.Driver
+
+	if command == "" {
+		log.Fatal("Specify a Command to run")
+	}
 
 	migrationPath := DefaultMigrationsFolder
 	if len(migrationFolder) > 0 {
@@ -31,38 +38,43 @@ func (mig *Migrator) Run(db *gorm.DB, args []string, migrationFolder ...string) 
 		log.Fatal("error getting sql.DB representation:", err)
 	}
 
-	driver, err := postgres.WithInstance(sqlDB, &postgres.Config{})
-	if err != nil {
-		log.Fatal("error instantiating postgres instance:", err)
+	dbName := db.Config.Dialector.Name()
+	switch dbName {
+	case "postgres":
+		driver, err = postgres.WithInstance(sqlDB, &postgres.Config{})
+		if err != nil {
+			log.Fatal("error instantiating postgres instance:", err)
+		}
+	case "mysql":
+		driver, err = mysql.WithInstance(sqlDB, &mysql.Config{})
+		if err != nil {
+			log.Fatal("error instantiating postgres instance:", err)
+		}
+	case "sqlite":
+		driver, err = sqlite.WithInstance(sqlDB, &sqlite.Config{})
+		if err != nil {
+			log.Fatal("error instantiating postgres instance:", err)
+		}
+	default:
+		log.Fatal("Datebase not supported")
 	}
 
-	m, err := migrate.NewWithDatabaseInstance("file://"+migrationPath, "postgres", driver)
+	m, err := migrate.NewWithDatabaseInstance("file://"+migrationPath, dbName, driver)
 	if err != nil {
 		log.Fatal("error instantiating migration instance:", err)
 	}
 
 	startTime := time.Now()
 
-	if len(args) == 0 {
-		log.Fatal("You must pass a least one args")
-	}
-
-	switch args[0] {
+	switch command {
 	case "up":
 		err = m.Up()
 	case "down":
 		err = m.Steps(-1)
 	case "clear":
 		err = m.Down()
-	case "force":
-		version, _ := strconv.Atoi(args[1])
-		err = m.Force(version)
 	case "create":
-		args := args[1:]
-		createFlagSet := flag.NewFlagSet("create", flag.ExitOnError)
-		_ = createFlagSet.Parse(args)
-
-		if createFlagSet.NArg() == 0 {
+		if migrationname == "" {
 			log.Fatal("Specify a name for the migration")
 		}
 
@@ -74,7 +86,8 @@ func (mig *Migrator) Run(db *gorm.DB, args []string, migrationFolder ...string) 
 		if sqlUp == "" && sqlDown == "" {
 			return nil
 		}
-		createCmd(migrationPath, startTime.Unix(), createFlagSet.Arg(0), sqlUp, sqlDown)
+
+		createCmd(migrationPath, startTime.Unix(), migrationname, sqlUp, sqlDown)
 	}
 
 	if err != nil {
