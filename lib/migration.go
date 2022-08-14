@@ -16,21 +16,12 @@ import (
 	"gorm.io/gorm"
 )
 
-const (
-	DefaultMigrationsFolder = "migrations/sql/"
-)
-
-func (mig *Migrator) Run(db *gorm.DB, command string, migrationname string, migrationFolder ...string) error {
+func (mg *Migrator) Run(db *gorm.DB, command string, migrationname string) error {
 	var err error
 	var driver database.Driver
 
 	if command == "" {
 		log.Fatal("Specify a Command to run")
-	}
-
-	migrationPath := DefaultMigrationsFolder
-	if len(migrationFolder) > 0 {
-		migrationPath = migrationFolder[0]
 	}
 
 	sqlDB, err := db.DB()
@@ -59,7 +50,7 @@ func (mig *Migrator) Run(db *gorm.DB, command string, migrationname string, migr
 		log.Fatal("Datebase not supported")
 	}
 
-	m, err := migrate.NewWithDatabaseInstance("file://"+migrationPath, dbName, driver)
+	m, err := migrate.NewWithDatabaseInstance("file://"+mg.migrationPath, dbName, driver)
 	if err != nil {
 		log.Fatal("error instantiating migration instance:", err)
 	}
@@ -79,7 +70,7 @@ func (mig *Migrator) Run(db *gorm.DB, command string, migrationname string, migr
 		}
 
 		//generate migration
-		sqlUp, sqlDown, err := mig.AutoMigrate()
+		sqlUp, sqlDown, err := mg.AutoMigrate()
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -87,7 +78,7 @@ func (mig *Migrator) Run(db *gorm.DB, command string, migrationname string, migr
 			return nil
 		}
 
-		createCmd(migrationPath, startTime.Unix(), migrationname, sqlUp, sqlDown)
+		createCmd(mg.migrationPath, startTime.Unix(), migrationname, sqlUp, sqlDown)
 	}
 
 	if err != nil {

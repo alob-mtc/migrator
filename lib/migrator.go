@@ -16,12 +16,14 @@ import (
 var (
 	regRealDataType = regexp.MustCompile(`[^\d](\d+)[^\d]?`)
 	regFullDataType = regexp.MustCompile(`[^\d]*(\d+)[^\d]?`)
+	DefaultMigrationsFolder = "migrations/sql"
 )
 
 // Migrator m struct
 type Migrator struct {
 	Config
-	Models []interface{}
+	Models        []interface{}
+	migrationPath string
 }
 
 // Config schema config
@@ -36,13 +38,18 @@ type GormDataTypeInterface interface {
 	GormDBDataType(*gorm.DB, *schema.Field) string
 }
 
-func New(db *gorm.DB) *Migrator {
+func New(db *gorm.DB, migrationFolder ...string) *Migrator {
+	migrationPath := DefaultMigrationsFolder
+	if len(migrationFolder) > 0 {
+		migrationPath = migrationFolder[0]
+	}
 	return &Migrator{
 		Config: Config{
 			CreateIndexAfterCreateTable: true,
 			DB:                          db,
 		},
-		Models: []interface{}{},
+		Models:        make([]interface{}, 0),
+		migrationPath: migrationPath,
 	}
 }
 
