@@ -2,9 +2,7 @@
 
 Migrator is a database migration tool, that automates schema migration.
 
-It scans Schema
-
-For a comparison between dbmate and other popular database schema migration tools, please see the [Alternatives](#alternatives) table.
+**It scans Schema/Model changes and generate SQL migration scripts automatically to reconcile those changes with the Database.**
 
 ## Table of Contents
 
