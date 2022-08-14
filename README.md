@@ -112,7 +112,21 @@ func main() {
 
 ### Running Migrations
 
-TODO:
+```go
+//.....
+
+func main() {
+
+	//.....
+
+	err = newMigrator.Run(db, "up")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+}
+
+```
 
 ### Rolling Back Migrations
 

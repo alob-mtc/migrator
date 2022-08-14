@@ -16,7 +16,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func (mg *Migrator) Run(db *gorm.DB, command string, migrationname string) error {
+func (mg *Migrator) Run(db *gorm.DB, command string, migrationname ...string) error {
 	var err error
 	var driver database.Driver
 
@@ -65,7 +65,7 @@ func (mg *Migrator) Run(db *gorm.DB, command string, migrationname string) error
 	case "clear":
 		err = m.Down()
 	case "create":
-		if migrationname == "" {
+		if len(migrationname) == 0 || migrationname[0] == "" {
 			log.Fatal("Specify a name for the migration")
 		}
 
@@ -78,7 +78,7 @@ func (mg *Migrator) Run(db *gorm.DB, command string, migrationname string) error
 			return nil
 		}
 
-		createCmd(mg.migrationPath, startTime.Unix(), migrationname, sqlUp, sqlDown)
+		createCmd(mg.migrationPath, startTime.Unix(), migrationname[0], sqlUp, sqlDown)
 	}
 
 	if err != nil {
