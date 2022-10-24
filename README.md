@@ -82,7 +82,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Established database connection
 
 	// Register Model
 	newMigrator := migrator.New(db, "migrations/sql/")
