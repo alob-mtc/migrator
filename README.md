@@ -55,7 +55,7 @@ import (
 	migrator "github.com/alob-mtc/migrator/lib"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-  "time"
+	"time"
 )
 
 type User struct {
@@ -67,7 +67,7 @@ type User struct {
 	DeletedAt gorm.DeletedAt `gorm:"index"`
 }
 
-type Poduct struct {
+type Product struct {
 	ID        string `gorm:"primaryKey;"`
 	Name      string `gorm:"index; not null"`
 	CreatedAt time.Time
@@ -86,7 +86,7 @@ func main() {
 
 	// Register Model
 	newMigrator := migrator.New(db, "migrations/sql/")
-	newMigrator.RegisterModel(&User{}, &Poduct{})
+	newMigrator.RegisterModel(&User{}, &Product{})
 
 }
 
