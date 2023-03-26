@@ -97,7 +97,10 @@ func (mg *Migrator) createCmd(timestamp time.Time, name string, sqlUp string, sq
 	_ = os.MkdirAll(mg.migrationPath, os.ModePerm)
 	upName, downName := mg.NamingStrategy(mg.migrationPath, name, timestamp)
 	createFile(upName, sqlUp)
-	createFile(downName, sqlDown)
+
+	if mg.DownMigrationsEnabled {
+		createFile(downName, sqlDown)
+	}
 }
 
 func createFile(fname string, content string) {

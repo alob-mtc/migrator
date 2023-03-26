@@ -41,6 +41,7 @@ type Config struct {
 	CreateIndexAfterCreateTable bool
 	DB                          *gorm.DB
 	NamingStrategy              namingStrategy
+	DownMigrationsEnabled       bool
 	gorm.Dialector
 }
 
@@ -59,6 +60,7 @@ func New(db *gorm.DB, migrationFolder ...string) *Migrator {
 			CreateIndexAfterCreateTable: true,
 			DB:                          db,
 			NamingStrategy:              defaultNamingStrategy,
+			DownMigrationsEnabled:       true,
 		},
 		Models:        make([]interface{}, 0),
 		migrationPath: migrationPath,
