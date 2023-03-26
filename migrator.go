@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	regRealDataType = regexp.MustCompile(`[^\d](\d+)[^\d]?`)
-	regFullDataType = regexp.MustCompile(`[^\d]*(\d+)[^\d]?`)
+	regRealDataType         = regexp.MustCompile(`[^\d](\d+)[^\d]?`)
+	regFullDataType         = regexp.MustCompile(`[^\d]*(\d+)[^\d]?`)
 	defaultMigrationsFolder = "migrations/sql"
 )
 
