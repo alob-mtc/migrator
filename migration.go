@@ -78,7 +78,7 @@ func (mg *Migrator) Run(db *gorm.DB, command string, migrationname ...string) er
 			return nil
 		}
 
-		createCmd(mg.migrationPath, startTime.Unix(), migrationname[0], sqlUp, sqlDown)
+		mg.createCmd(startTime, migrationname[0], sqlUp, sqlDown)
 	}
 
 	if err != nil {
@@ -93,11 +93,14 @@ func (mg *Migrator) Run(db *gorm.DB, command string, migrationname ...string) er
 	return nil
 }
 
-func createCmd(migrationPath string, timestamp int64, name string, sqlUp string, sqlDown string) {
-	base := fmt.Sprintf("%v%v_%v.", migrationPath, timestamp, name)
-	_ = os.MkdirAll(migrationPath, os.ModePerm)
-	createFile(base+"up.sql", sqlUp)
-	createFile(base+"down.sql", sqlDown)
+func (mg *Migrator) createCmd(timestamp time.Time, name string, sqlUp string, sqlDown string) {
+	_ = os.MkdirAll(mg.migrationPath, os.ModePerm)
+	upName, downName := mg.NamingStrategy(mg.migrationPath, name, timestamp)
+	createFile(upName, sqlUp)
+
+	if mg.DownMigrationsEnabled {
+		createFile(downName, sqlDown)
+	}
 }
 
 func createFile(fname string, content string) {

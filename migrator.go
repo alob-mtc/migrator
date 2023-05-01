@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -14,8 +15,8 @@ import (
 )
 
 var (
-	regRealDataType = regexp.MustCompile(`[^\d](\d+)[^\d]?`)
-	regFullDataType = regexp.MustCompile(`[^\d]*(\d+)[^\d]?`)
+	regRealDataType         = regexp.MustCompile(`[^\d](\d+)[^\d]?`)
+	regFullDataType         = regexp.MustCompile(`[^\d]*(\d+)[^\d]?`)
 	defaultMigrationsFolder = "migrations/sql"
 )
 
@@ -26,10 +27,21 @@ type Migrator struct {
 	migrationPath string
 }
 
+type namingStrategy func(migrationPath, name string, t time.Time) (string, string)
+
+func defaultNamingStrategy(migrationPath, name string, t time.Time) (string, string) {
+	timestamp := t.Unix()
+	base := fmt.Sprintf("%v%v_%v.", migrationPath, timestamp, name)
+
+	return base + "up.sql", base + "down.sql"
+}
+
 // Config schema config
 type Config struct {
 	CreateIndexAfterCreateTable bool
 	DB                          *gorm.DB
+	NamingStrategy              namingStrategy
+	DownMigrationsEnabled       bool
 	gorm.Dialector
 }
 
@@ -47,6 +59,8 @@ func New(db *gorm.DB, migrationFolder ...string) *Migrator {
 		Config: Config{
 			CreateIndexAfterCreateTable: true,
 			DB:                          db,
+			NamingStrategy:              defaultNamingStrategy,
+			DownMigrationsEnabled:       true,
 		},
 		Models:        make([]interface{}, 0),
 		migrationPath: migrationPath,
